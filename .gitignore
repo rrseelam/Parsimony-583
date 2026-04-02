@@ -1,0 +1,8 @@
+sleef/
+z3/
+ispc-v1.18.0-linux/
+*.o
+*.a
+build/
+tmp/
+install/

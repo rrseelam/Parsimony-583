@@ -14,10 +14,16 @@ then
 	exit 1
 fi
 
+<<<<<<< HEAD
 if [ `clang++ --version | head -n 1 | awk -F'(' '{print $1}' | awk '{print $3}' | awk -F'.' '{print $1}'` != "15" ]; 
 then 
 	echo "Error: LLVM-15 not installed.";
 	# exit 1
+=======
+if ! command -v clang++-15 >/dev/null 2>&1; then
+    echo "Error: LLVM-15 not installed."
+    exit 1
+>>>>>>> b3d58f006a92f64ac4c0715f42123bd23c0b31b2
 fi
 
 if [ `ispc --version | awk -F'(' '{print $4}' | awk -F'), ' '{print $2}'` != "1.18.0" ];

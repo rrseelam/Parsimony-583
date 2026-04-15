@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 z3/
 sleef/
 *.o
@@ -8,3 +9,13 @@ install/
 tmp_env/
 ispc-v1.18.0-linux/
 tmp_aos_to_soa/
+=======
+sleef/
+z3/
+ispc-v1.18.0-linux/
+*.o
+*.a
+build/
+tmp/
+install/
+>>>>>>> b3d58f006a92f64ac4c0715f42123bd23c0b31b2

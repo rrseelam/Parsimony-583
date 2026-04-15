@@ -1,0 +1,8 @@
+Benchmark Name, serial runtime (in million cycles), ispc runtime (in million cycles), psv runtime (in million cycles)
+AOBench, 5804.339, 573.841, 566.291
+3D Stencil, 788.042, 622.920, 620.130
+Volume Rendering, 36909.030, 9002.424, 18190.070
+Binomial Options, 521.355, 188.469, 275.996
+Black-Scholes, 13.796, 1.859, 1.667
+Mandelbrot Set, 300.351, 27.568, 27.766
+Perlin Noise Function, 604.666, 169.277, 152.290

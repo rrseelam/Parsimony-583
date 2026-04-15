@@ -56,7 +56,12 @@ class ShapesStep {
     Shape calculateShapeExt(llvm::Instruction* ext, bool is_signed);
 
     void arrayLayoutOpt();
+    void structLayoutOpt();
     bool analyzeUses(llvm::Instruction* inst);
+    bool analyzeFlatStructAllocaUses(llvm::AllocaInst* inst);
+    bool isFlatPrimitiveStruct(llvm::StructType* ty) const;
+    Shape calculateShapeGEPWithBaseShape(llvm::GetElementPtrInst* inst,
+                                         Shape shape);
     llvm::Instruction* generateOptInsts(
         llvm::AllocaInst* inst,
         std::set<std::pair<llvm::Instruction*, llvm::Instruction*>>& toReplace);

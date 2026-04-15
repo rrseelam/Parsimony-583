@@ -458,6 +458,11 @@ Shape ShapesStep::calculateShapeCall(CallInst* call) {
 
 Shape ShapesStep::calculateShapeGEP(GetElementPtrInst* gep) {
     Shape shape = value_cache.getShape(gep->getPointerOperand());
+    return calculateShapeGEPWithBaseShape(gep, shape);
+}
+
+Shape ShapesStep::calculateShapeGEPWithBaseShape(GetElementPtrInst* gep,
+                                                 Shape shape) {
     Type* ty = gep->getPointerOperand()->getType();
     PRINT_HIGH("GEP source element type is " << *ty);
     PRINT_HIGH("GEP pointer has shape " << shape.toString());
@@ -544,6 +549,20 @@ Shape ShapesStep::calculateShapeGEP(GetElementPtrInst* gep) {
         PRINT_HIGH("New shape is " << shape.toString());
     }
     return shape;
+}
+
+bool ShapesStep::isFlatPrimitiveStruct(StructType* ty) const {
+    if (!ty || ty->isOpaque()) {
+        return false;
+    }
+
+    for (Type* elem_ty : ty->elements()) {
+        if (!(elem_ty->isIntegerTy() || elem_ty->isFloatingPointTy() ||
+              elem_ty->isPointerTy())) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /* Checks if array layout optimization could be applied for allocas */
@@ -662,6 +681,190 @@ void ShapesStep::arrayLayoutOpt() {
     }
 
     insertOptInsts(toReplace);
+}
+
+bool ShapesStep::analyzeFlatStructAllocaUses(AllocaInst* inst) {
+    if (cast<ConstantInt>(inst->getArraySize())->getZExtValue() != 1) {
+        return false;
+    }
+
+    StructType* ty = dyn_cast<StructType>(inst->getAllocatedType());
+    if (!isFlatPrimitiveStruct(ty)) {
+        return false;
+    }
+
+    TypeSize type_size = vf_info.data_layout.getTypeAllocSize(ty);
+    uint64_t align = inst->getAlign().value();
+    uint64_t padded_size = roundUp(type_size.getFixedSize(), align);
+    z3::expr base = Shape::symbolicExpr(vf_info.z3_ctx, inst->getName().str(),
+                                        getValueSizeBits(inst));
+    Shape alloca_shape = Shape::Strided(base, padded_size, num_lanes);
+
+    bool has_non_uniform_gep = false;
+    for (User* U : inst->users()) {
+        if (BitCastInst* bitcast = dyn_cast<BitCastInst>(U)) {
+            for (User* bitcast_user : bitcast->users()) {
+                CallInst* call = dyn_cast<CallInst>(bitcast_user);
+                if (!call || !call->getCalledFunction() ||
+                    !call->getCalledFunction()->isIntrinsic()) {
+                    return false;
+                }
+            }
+            continue;
+        }
+        if (CallInst* call = dyn_cast<CallInst>(U)) {
+            if (call->getCalledFunction() &&
+                call->getCalledFunction()->isIntrinsic()) {
+                continue;
+            }
+            return false;
+        }
+
+        GetElementPtrInst* gep = dyn_cast<GetElementPtrInst>(U);
+        if (!gep) {
+            return false;
+        }
+
+        for (User* gep_user : gep->users()) {
+            if (isa<GetElementPtrInst>(gep_user)) {
+                return false;
+            }
+        }
+
+        if (gep->getNumIndices() != 2) {
+            return false;
+        }
+
+        auto idx_it = gep->idx_begin();
+        Value* struct_idx = idx_it->get();
+        ++idx_it;
+        Value* field_idx = idx_it->get();
+
+        Shape field_shape = value_cache.getShape(field_idx);
+        if (!field_shape.isUniform() || !field_shape.hasConstantBase()) {
+            return false;
+        }
+
+        Shape gep_shape = calculateShapeGEPWithBaseShape(gep, alloca_shape);
+        if (!gep_shape.isUniform()) {
+            has_non_uniform_gep = true;
+        }
+
+        (void)struct_idx;
+    }
+
+    return has_non_uniform_gep;
+}
+
+void ShapesStep::structLayoutOpt() {
+    std::vector<AllocaInst*> candidates;
+    for (Instruction* I : vf_info.instruction_order) {
+        AllocaInst* alloca = dyn_cast<AllocaInst>(I);
+        if (!alloca) continue;
+        StructType* ty = dyn_cast<StructType>(alloca->getAllocatedType());
+        if (!isFlatPrimitiveStruct(ty)) continue;
+        if (!analyzeFlatStructAllocaUses(alloca)) continue;
+        candidates.push_back(alloca);
+    }
+
+    for (AllocaInst* alloca : candidates) {
+        StructType* ty = cast<StructType>(alloca->getAllocatedType());
+
+        PRINT_HIGH("Struct layout Opt -- Optimizing alloca " << *alloca);
+
+        SmallVector<AllocaInst*, 4> field_allocas;
+        field_allocas.reserve(ty->getNumElements());
+        ConstantInt* num_elements = ConstantInt::get(
+            cast<IntegerType>(alloca->getArraySize()->getType()), num_lanes);
+
+        Instruction* insert_pt = alloca;
+        auto alloca_it = std::find(vf_info.instruction_order.begin(),
+                                   vf_info.instruction_order.end(), alloca);
+        for (unsigned field = 0; field < ty->getNumElements(); ++field) {
+            Type* field_ty = ty->getElementType(field);
+            Instruction* field_alloca =
+                new AllocaInst(field_ty, 0, num_elements, alloca->getAlign(),
+                               alloca->getName() + ".field" +
+                                   std::to_string(field));
+            field_alloca->insertAfter(insert_pt);
+            insert_pt = field_alloca;
+            field_allocas.push_back(cast<AllocaInst>(field_alloca));
+
+            z3::expr base = Shape::symbolicExpr(
+                vf_info.z3_ctx, field_alloca->getName().str(),
+                getValueSizeBits(field_alloca));
+            value_cache.setShape(field_alloca, Shape::Uniform(base, num_lanes));
+            value_cache.setArrayLayoutOpt(field_alloca);
+
+            alloca_it =
+                vf_info.instruction_order.insert(std::next(alloca_it), field_alloca);
+        }
+
+        SmallVector<GetElementPtrInst*, 4> old_geps;
+        for (User* U : alloca->users()) {
+            old_geps.push_back(cast<GetElementPtrInst>(U));
+        }
+
+        Function* lane_num = vf_info.mod->getFunction("psim_get_lane_num");
+        ASSERT(lane_num, "Could not find psim_get_lane_num");
+
+        for (GetElementPtrInst* gep : old_geps) {
+            auto idx_it = gep->idx_begin();
+            ++idx_it;
+            ConstantInt* field_idx = dyn_cast<ConstantInt>(idx_it->get());
+            if (!field_idx) {
+                FATAL("Struct layout opt requires constant field index in "
+                      << *gep);
+            }
+
+            Instruction* lane_id =
+                CallInst::Create(lane_num, gep->getName() + ".lane");
+            lane_id->insertBefore(gep);
+            auto gep_it = std::find(vf_info.instruction_order.begin(),
+                                    vf_info.instruction_order.end(), gep);
+            gep_it = vf_info.instruction_order.insert(gep_it, lane_id);
+
+            Type* field_ty = ty->getElementType(field_idx->getZExtValue());
+            Instruction* new_gep = GetElementPtrInst::Create(
+                field_ty, field_allocas[field_idx->getZExtValue()], {lane_id},
+                gep->getName() + ".");
+            new_gep->insertAfter(lane_id);
+            *std::next(gep_it) = new_gep;
+
+            PRINT_HIGH("Struct layout Opt -- Replacing: " << *gep
+                                                          << " With: "
+                                                          << *new_gep);
+            gep->replaceAllUsesWith(new_gep);
+            gep->eraseFromParent();
+        }
+
+        vf_info.instruction_order.erase(std::find(vf_info.instruction_order.begin(),
+                                                  vf_info.instruction_order.end(),
+                                                  alloca));
+
+        SmallVector<Instruction*, 4> to_erase;
+        for (User* U : alloca->users()) {
+            if (BitCastInst* bitcast = dyn_cast<BitCastInst>(U)) {
+                for (User* bitcast_user : bitcast->users()) {
+                    if (Instruction* I = dyn_cast<Instruction>(bitcast_user)) {
+                        to_erase.push_back(I);
+                    }
+                }
+                to_erase.push_back(bitcast);
+            } else if (Instruction* I = dyn_cast<Instruction>(U)) {
+                to_erase.push_back(I);
+            }
+        }
+        for (Instruction* dead : to_erase) {
+            auto dead_it = std::find(vf_info.instruction_order.begin(),
+                                     vf_info.instruction_order.end(), dead);
+            if (dead_it != vf_info.instruction_order.end()) {
+                vf_info.instruction_order.erase(dead_it);
+            }
+            dead->eraseFromParent();
+        }
+        alloca->eraseFromParent();
+    }
 }
 
 Shape ShapesStep::calculateShapeCmp(ICmpInst* cmp) {
@@ -1267,6 +1470,7 @@ void ShapesStep::calculate() {
     }
 
     arrayLayoutOpt();
+    structLayoutOpt();
 
     for (Instruction* I : vf_info.instruction_order) {
         calculateShape(work_queue, I);

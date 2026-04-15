@@ -1,0 +1,10 @@
+z3/
+sleef/
+*.o
+build/
+tmp/
+*.a
+install/
+tmp_env/
+ispc-v1.18.0-linux/
+tmp_aos_to_soa/

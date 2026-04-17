@@ -1270,11 +1270,154 @@ Value* TransformStep::transformPHISecondPass(PHINode* inst) {
     return inst;
 }
 
+bool TransformStep::isFlatStructType(StructType* sty) {
+    for (unsigned i = 0; i < sty->getNumElements(); i++) {
+        Type* field_ty = sty->getElementType(i);
+        if (field_ty->isIntegerTy() || field_ty->isFloatingPointTy() ||
+            field_ty->isPointerTy()) {
+            continue;
+        }
+        return false;
+    }
+    return sty->getNumElements() > 0;
+}
+
+bool TransformStep::hasVaryingGEPUser(AllocaInst* inst) {
+    for (User* U : inst->users()) {
+        auto* gep = dyn_cast<GetElementPtrInst>(U);
+        if (!gep) continue;
+        if (value_cache.has(gep) && value_cache.getShape(gep).isVarying()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool TransformStep::isSoASafe(AllocaInst* inst) {
+    for (User* U : inst->users()) {
+        if (auto* gep = dyn_cast<GetElementPtrInst>(U)) {
+            for (User* GU : gep->users()) {
+                if (isa<LoadInst>(GU) || isa<StoreInst>(GU)) {
+                    continue;
+                }
+                if (auto* call = dyn_cast<CallInst>(GU)) {
+                    if (call->getCalledFunction() &&
+                        call->getCalledFunction()->isIntrinsic()) {
+                        continue;
+                    }
+                }
+                PRINT_HIGH("AoS-to-SoA: GEP has non-load/store user "
+                           << *GU << ", skipping");
+                return false;
+            }
+        } else if (auto* call = dyn_cast<CallInst>(U)) {
+            if (call->getCalledFunction() &&
+                call->getCalledFunction()->isIntrinsic()) {
+                continue;
+            }
+            PRINT_HIGH("AoS-to-SoA: alloca has non-intrinsic call user "
+                       << *call << ", skipping");
+            return false;
+        } else if (isa<BitCastInst>(U)) {
+            continue;
+        } else {
+            PRINT_HIGH("AoS-to-SoA: alloca has non-GEP user "
+                       << *U << ", skipping");
+            return false;
+        }
+    }
+    return true;
+}
+
+Value* TransformStep::transformStructAllocaSoA(AllocaInst* inst) {
+    StructType* sty = cast<StructType>(inst->getAllocatedType());
+    unsigned num_fields = sty->getNumElements();
+
+    PRINT_HIGH("AoS-to-SoA: transforming struct alloca " << *inst
+               << " with " << num_fields << " fields");
+
+    std::vector<AllocaInst*> field_allocas(num_fields);
+    Instruction* insert_point = inst;
+
+    for (unsigned i = 0; i < num_fields; i++) {
+        Type* field_ty = sty->getElementType(i);
+        Type* arr_ty = ArrayType::get(field_ty, num_lanes);
+        auto* fa = new AllocaInst(arr_ty, 0, nullptr, inst->getAlign(),
+                                  inst->getName() + ".soa.f" +
+                                      std::to_string(i));
+        fa->insertAfter(insert_point);
+        insert_point = fa;
+        field_allocas[i] = fa;
+        PRINT_HIGH("AoS-to-SoA: created per-field alloca " << *fa);
+    }
+
+    Value* lane_id = vf_info.getLaneID();
+
+    std::vector<Instruction*> geps_to_remove;
+    for (User* U : inst->users()) {
+        auto* gep = dyn_cast<GetElementPtrInst>(U);
+        if (!gep) continue;
+
+        for (User* GU : gep->users()) {
+            if (isa<GetElementPtrInst>(GU)) {
+                PRINT_HIGH("AoS-to-SoA: found chained GEP user, bailing out");
+                return nullptr;
+            }
+        }
+
+        auto idx_it = gep->idx_begin();
+        if (idx_it == gep->idx_end()) continue;
+
+        ++idx_it;  // skip the leading 0 index into the struct pointer
+        if (idx_it == gep->idx_end()) continue;
+
+        Value* field_idx_val = *idx_it;
+        auto* field_idx_const = dyn_cast<ConstantInt>(field_idx_val);
+        ASSERT(field_idx_const,
+               "AoS-to-SoA: non-constant field index in struct GEP "
+                   << *gep);
+
+        unsigned field_idx = field_idx_const->getZExtValue();
+        ASSERT(field_idx < num_fields,
+               "AoS-to-SoA: field index out of range " << field_idx);
+
+        Type* field_arr_ty = ArrayType::get(sty->getElementType(field_idx),
+                                            num_lanes);
+
+        IRBuilder<> builder(gep->getParent());
+        builder.SetInsertPoint(gep->getNextNode());
+        Value* new_gep = builder.CreateGEP(
+            field_arr_ty, field_allocas[field_idx],
+            {ConstantInt::get(Type::getInt32Ty(vf_info.ctx), 0), lane_id},
+            gep->getName() + ".soa.");
+        PRINT_HIGH("AoS-to-SoA: rewrote GEP " << *gep << " -> " << *new_gep);
+
+        gep->replaceAllUsesWith(new_gep);
+        geps_to_remove.push_back(gep);
+    }
+
+    for (auto* gep : geps_to_remove) {
+        value_cache.setToBeDeleted(gep);
+    }
+
+    value_cache.setToBeDeleted(inst);
+
+    Type* result_ty =
+        VectorType::get(inst->getType(), getElementCount(num_lanes));
+    Value* dummy = UndefValue::get(result_ty);
+    return dummy;
+}
+
 Value* TransformStep::transformAlloca(AllocaInst* inst) {
-    // TODO: struct layout optimizations
     PRINT_HIGH("Original alloca instruction is " << *inst);
 
     if (inst->getAllocatedType()->isStructTy()) {
+        StructType* sty = cast<StructType>(inst->getAllocatedType());
+        if (isFlatStructType(sty) && hasVaryingGEPUser(inst) &&
+            isSoASafe(inst)) {
+            Value* result = transformStructAllocaSoA(inst);
+            if (result) return result;
+        }
         vf_info.diagnostics.unoptimized_allocas.push_back(valueString(inst));
     }
 

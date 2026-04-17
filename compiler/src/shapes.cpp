@@ -548,40 +548,53 @@ Shape ShapesStep::calculateShapeGEP(GetElementPtrInst* gep) {
 
 /* Checks if array layout optimization could be applied for allocas */
 bool ShapesStep::analyzeUses(Instruction* inst) {
-    for (User* U : inst->users()) {
-        if (isa<LoadInst>(U))
-            continue;
-        else if (isa<BitCastInst>(U)) {
-            /* Recursively check users of bcast */
-            if (analyzeUses(cast<Instruction>(U))) continue;
-            return false;
-        } else if (isa<GetElementPtrInst>(U)) {
-            /* Disable opt for alloca->gep->gep->... for now. */
-            if (isa<GetElementPtrInst>(inst)) return false;
-            /* Recursively check users of gep */
-            if (analyzeUses(cast<Instruction>(U))) continue;
-            return false;
-        } else if (CallInst* call = dyn_cast<CallInst>(U)) {
-            /* Conservatively return false for
-                all CallInsts except intrinsics */
-            if (call->getCalledFunction()->isIntrinsic()) continue;
-            return false;
-        } else if (StoreInst* store = dyn_cast<StoreInst>(U)) {
-            // pointers cannot escape
-            if (store->getValueOperand() != inst) continue;
-            return false;
-        } else {
-            // Conservatively return false for other insts
-            return false;
+    struct AnalyzeState {
+        Instruction* inst;
+        bool lane_inserted;
+    };
+
+    std::vector<AnalyzeState> worklist{{inst, false}};
+    std::unordered_set<Instruction*> visited;
+
+    while (!worklist.empty()) {
+        AnalyzeState state = worklist.back();
+        worklist.pop_back();
+        Instruction* current = state.inst;
+        if (!visited.insert(current).second) continue;
+
+        for (User* U : current->users()) {
+            if (isa<LoadInst>(U)) {
+                continue;
+            } else if (isa<BitCastInst>(U)) {
+                // A bitcast before the first array-indexing GEP loses the place
+                // where the lane dimension has to be introduced.
+                if (!state.lane_inserted) return false;
+                worklist.push_back({cast<Instruction>(U), true});
+            } else if (isa<GetElementPtrInst>(U)) {
+                worklist.push_back({cast<Instruction>(U), true});
+            } else if (CallInst* call = dyn_cast<CallInst>(U)) {
+                /* Conservatively return false for all CallInsts except
+                 * intrinsics. */
+                Function* callee = call->getCalledFunction();
+                if (callee && callee->isIntrinsic()) continue;
+                return false;
+            } else if (StoreInst* store = dyn_cast<StoreInst>(U)) {
+                // pointers cannot escape
+                if (store->getValueOperand() != current) continue;
+                return false;
+            } else {
+                // Conservatively return false for other insts
+                return false;
+            }
         }
     }
     return true;
 }
 
-/* Generates array layout optimized allocas and geps. */
+/* Generates array layout optimized allocas and pointer derivations. */
 llvm::Instruction* ShapesStep::generateOptInsts(
     AllocaInst* inst,
-    std::set<std::pair<Instruction*, Instruction*>>& toReplace) {
+    std::vector<std::pair<Instruction*, Instruction*>>& toReplace) {
     ArrayType* arr_ty = dyn_cast<ArrayType>(inst->getAllocatedType());
     Type* new_array_type = ArrayType::get(arr_ty->getElementType(), num_lanes);
     new_array_type = ArrayType::get(new_array_type, arr_ty->getNumElements());
@@ -589,29 +602,79 @@ llvm::Instruction* ShapesStep::generateOptInsts(
         new AllocaInst(new_array_type, 0, inst->getArraySize(),
                        inst->getAlign(), inst->getName() + ".");
     PRINT_HIGH("Array layout Opt -- New alloca is: " << *new_alloca);
-    toReplace.insert(std::make_pair(inst, new_alloca));
+    toReplace.emplace_back(inst, new_alloca);
 
-    for (User* U : inst->users()) {
-        GetElementPtrInst* gep = dyn_cast<GetElementPtrInst>(U);
-        if (!gep) continue;
-        std::vector<Value*> idxlist;
-        for (Value* v : gep->indices()) {
-            idxlist.push_back(v);
+    struct RewriteState {
+        Instruction* inst;
+        bool lane_inserted;
+    };
+
+    std::vector<RewriteState> worklist{{inst, false}};
+    std::unordered_map<Instruction*, Instruction*> rewritten;
+    rewritten.insert(std::make_pair(inst, new_alloca));
+
+    while (!worklist.empty()) {
+        RewriteState state = worklist.back();
+        worklist.pop_back();
+
+        Instruction* current = state.inst;
+        Instruction* new_current = rewritten.at(current);
+
+        for (User* U : current->users()) {
+            Instruction* user = dyn_cast<Instruction>(U);
+            if (!user || isa<LoadInst>(user)) continue;
+
+            if (StoreInst* store = dyn_cast<StoreInst>(user)) {
+                if (store->getValueOperand() != current) continue;
+                continue;
+            }
+
+            if (CallInst* call = dyn_cast<CallInst>(user)) {
+                Function* callee = call->getCalledFunction();
+                if (callee && callee->isIntrinsic()) continue;
+                continue;
+            }
+
+            if (rewritten.find(user) != rewritten.end()) continue;
+
+            Instruction* replacement = nullptr;
+            bool lane_inserted = state.lane_inserted;
+            if (BitCastInst* bitcast = dyn_cast<BitCastInst>(user)) {
+                replacement = new BitCastInst(new_current, bitcast->getType(),
+                                             bitcast->getName() + ".");
+            } else if (GetElementPtrInst* gep = dyn_cast<GetElementPtrInst>(user)) {
+                std::vector<Value*> idxlist;
+                for (Value* v : gep->indices()) {
+                    idxlist.push_back(v);
+                }
+                if (!lane_inserted) {
+                    Function* lane_num =
+                        vf_info.mod->getFunction("psim_get_lane_num");
+                    Instruction* get_lane_id =
+                        CallInst::Create(lane_num, gep->getName() + ".");
+                    idxlist.push_back(get_lane_id);
+                    lane_inserted = true;
+                }
+
+                PointerType* ptr_ty = cast<PointerType>(new_current->getType());
+                Type* source_type = ptr_ty->getNonOpaquePointerElementType();
+                replacement = GetElementPtrInst::Create(
+                    source_type, new_current, idxlist, gep->getName() + ".");
+            } else {
+                continue;
+            }
+
+            rewritten.insert(std::make_pair(user, replacement));
+            toReplace.emplace_back(user, replacement);
+            worklist.push_back({user, lane_inserted});
         }
-        Function* lane_num = vf_info.mod->getFunction("psim_get_lane_num");
-        Instruction* get_lane_id =
-            CallInst::Create(lane_num, gep->getName() + ".");
-        idxlist.push_back(get_lane_id);
-        Instruction* new_gep = GetElementPtrInst::Create(
-            new_array_type, new_alloca, idxlist, gep->getName() + ".");
-        toReplace.insert(std::make_pair(gep, new_gep));
     }
     return new_alloca;
 }
 
-/* Replaces allocas and geps with array layout optimized versions. */
+/* Replaces allocas and pointer derivations with array layout optimized ones. */
 void ShapesStep::insertOptInsts(
-    std::set<std::pair<Instruction*, Instruction*>>& toReplace) {
+    std::vector<std::pair<Instruction*, Instruction*>>& toReplace) {
     for (auto& i : toReplace) {
         PRINT_HIGH("Array layout Opt -- Replacing: " << *i.first
                                                      << " With: " << *i.second);
@@ -620,19 +683,15 @@ void ShapesStep::insertOptInsts(
             // call
             Value* val = gep->getOperand(gep->getNumOperands() - 1);
             CallInst* call = dyn_cast<CallInst>(val);
-            if (!call || vf_info.vm_info.function_resolver.getPsimApiEnum(
-                             call->getCalledFunction()) !=
-                             FunctionResolver::PsimApiEnum::GET_LANE_NUM)
-                FATAL(
-                    "Array layout opt -- Last index of gep not a getlanenum "
-                    "call"
-                    << *val);
-
-            call->insertBefore(i.first);
-            vf_info.instruction_order.insert(
-                std::find(std::begin(vf_info.instruction_order),
-                          std::end(vf_info.instruction_order), i.first),
-                call);
+            if (call && vf_info.vm_info.function_resolver.getPsimApiEnum(
+                            call->getCalledFunction()) ==
+                            FunctionResolver::PsimApiEnum::GET_LANE_NUM) {
+                call->insertBefore(i.first);
+                vf_info.instruction_order.insert(
+                    std::find(std::begin(vf_info.instruction_order),
+                              std::end(vf_info.instruction_order), i.first),
+                    call);
+            }
         }
         i.second->insertAfter(i.first);
         i.first->replaceAllUsesWith(i.second);
@@ -644,10 +703,12 @@ void ShapesStep::insertOptInsts(
 
 /* Checks for and applies array layout optimization for allocas. */
 void ShapesStep::arrayLayoutOpt() {
-    std::set<std::pair<Instruction*, Instruction*>> toReplace;
+    std::vector<std::pair<Instruction*, Instruction*>> toReplace;
+    toReplace.reserve(vf_info.instruction_order.size());
     for (Instruction* I : vf_info.instruction_order) {
         AllocaInst* alloca = dyn_cast<AllocaInst>(I);
         if (!alloca) continue;
+        if (alloca->user_empty()) continue;
         ArrayType* ty = dyn_cast<ArrayType>(alloca->getAllocatedType());
         if (!ty) continue;
         if (ty->getElementType()->isStructTy()) continue;

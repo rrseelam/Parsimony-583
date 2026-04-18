@@ -10,12 +10,18 @@
 
 #include "shapes.h"
 
+#include <llvm/ADT/ArrayRef.h>
+#include <llvm/ADT/DenseSet.h>
+#include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/GetElementPtrTypeIterator.h>
+#include <llvm/IR/IntrinsicInst.h>
 #include <llvm/Passes/PassBuilder.h>
 
 #include <chrono>
 #include <iomanip>
 #include <numeric>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -664,6 +670,456 @@ void ShapesStep::arrayLayoutOpt() {
     insertOptInsts(toReplace);
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
+namespace {
+
+Value* stripInChainPtrCasts(Value* v) {
+    while (BitCastInst* bc = dyn_cast<BitCastInst>(v)) {
+        v = bc->getOperand(0);
+    }
+    return v;
+}
+
+bool isPrimitiveLeafType(Type* t) {
+    return t->isIntegerTy() || t->isFloatingPointTy() || t->isPointerTy();
+}
+
+bool flattenStructLeaves(StructType* st, const SmallVector<unsigned, 8>& prefix,
+                         std::vector<std::vector<unsigned>>& out) {
+    for (unsigned i = 0; i < st->getNumElements(); ++i) {
+        Type* et = st->getElementType(i);
+        SmallVector<unsigned, 8> next = prefix;
+        next.push_back(i);
+        if (StructType* inner = dyn_cast<StructType>(et)) {
+            if (!flattenStructLeaves(inner, next, out)) {
+                return false;
+            }
+        } else if (isPrimitiveLeafType(et)) {
+            out.emplace_back(next.begin(), next.end());
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::optional<unsigned> leafIndexForPath(
+    const std::vector<std::vector<unsigned>>& leaves,
+    ArrayRef<unsigned> path) {
+    for (unsigned li = 0; li < leaves.size(); ++li) {
+        if (leaves[li].size() != path.size()) {
+            continue;
+        }
+        bool match = true;
+        for (unsigned j = 0; j < path.size(); ++j) {
+            if (leaves[li][j] != path[j]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            return li;
+        }
+    }
+    return std::nullopt;
+}
+
+bool collectStructFieldIndicesFromGEP(GetElementPtrInst* g,
+                                      SmallVectorImpl<unsigned>& out) {
+    for (gep_type_iterator I = gep_type_begin(g), E = gep_type_end(g); I != E;
+         ++I) {
+        if (I.isStruct()) {
+            ConstantInt* ci = dyn_cast<ConstantInt>(I.getOperand());
+            if (!ci) {
+                return false;
+            }
+            out.push_back((unsigned)ci->getZExtValue());
+        } else if (isa<ArrayType>(I.getIndexedType())) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool collectFullStructFieldPath(AllocaInst* root, GetElementPtrInst* leaf,
+                                SmallVectorImpl<unsigned>& fullPath) {
+    SmallVector<GetElementPtrInst*, 8> chain;
+    Value* v = leaf;
+    for (;;) {
+        v = stripInChainPtrCasts(v);
+        if (GetElementPtrInst* g = dyn_cast<GetElementPtrInst>(v)) {
+            chain.push_back(g);
+            v = g->getPointerOperand();
+            continue;
+        }
+        if (v == root) {
+            break;
+        }
+        return false;
+    }
+    std::reverse(chain.begin(), chain.end());
+    for (GetElementPtrInst* g : chain) {
+        SmallVector<unsigned, 8> seg;
+        if (!collectStructFieldIndicesFromGEP(g, seg)) {
+            return false;
+        }
+        fullPath.append(seg);
+    }
+    return true;
+}
+
+void eraseLifetimeUsers(AllocaInst* a,
+                        std::vector<llvm::Instruction*>& instruction_order) {
+    SmallVector<Instruction*, 8> kill;
+    for (User* u : a->users()) {
+        IntrinsicInst* ii = dyn_cast<IntrinsicInst>(u);
+        if (!ii) {
+            continue;
+        }
+        switch (ii->getIntrinsicID()) {
+            case Intrinsic::lifetime_start:
+            case Intrinsic::lifetime_end:
+                kill.push_back(ii);
+                break;
+            default:
+                break;
+        }
+    }
+    for (Instruction* i : kill) {
+        instruction_order.erase(std::remove(instruction_order.begin(),
+                                              instruction_order.end(), i),
+                                 instruction_order.end());
+        i->eraseFromParent();
+    }
+}
+
+bool buildAllocaReachableRegion(AllocaInst* root, DenseSet<Value*>& region) {
+    SmallVector<Value*, 32> work;
+    region.clear();
+    work.push_back(root);
+    region.insert(root);
+    while (!work.empty()) {
+        Value* v = work.pop_back_val();
+        for (User* rawU : v->users()) {
+            Instruction* u = dyn_cast<Instruction>(rawU);
+            if (!u) {
+                return false;
+            }
+            if (GetElementPtrInst* g = dyn_cast<GetElementPtrInst>(u)) {
+                if (g->getPointerOperand() != v) {
+                    return false;
+                }
+                if (region.insert(g).second) {
+                    work.push_back(g);
+                }
+                continue;
+            }
+            if (BitCastInst* bc = dyn_cast<BitCastInst>(u)) {
+                if (bc->getOperand(0) != v) {
+                    return false;
+                }
+                if (region.insert(bc).second) {
+                    work.push_back(bc);
+                }
+                continue;
+            }
+            if (LoadInst* l = dyn_cast<LoadInst>(u)) {
+                if (l->getPointerOperand() != v) {
+                    return false;
+                }
+                continue;
+            }
+            if (StoreInst* s = dyn_cast<StoreInst>(u)) {
+                if (s->getPointerOperand() == v) {
+                    continue;
+                }
+                if (s->getValueOperand() == v) {
+                    return false;
+                }
+                continue;
+            }
+            if (isa<DbgInfoIntrinsic>(u)) {
+                continue;
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+bool anyVaryingDerivedFromRegionLoads(const DenseSet<Value*>& region,
+                                      ValueCache& value_cache) {
+    SmallVector<Value*, 64> q;
+    DenseSet<Value*> visited;
+    auto enqueue = [&](Value* x) {
+        if (!x) {
+            return;
+        }
+        if (!visited.insert(x).second) {
+            return;
+        }
+        q.push_back(x);
+    };
+
+    for (Value* v : region) {
+        for (Use& use : v->uses()) {
+            User* user = use.getUser();
+            if (auto* ld = dyn_cast<LoadInst>(user)) {
+                if (stripInChainPtrCasts(ld->getPointerOperand()) != v &&
+                    ld->getPointerOperand() != v) {
+                    continue;
+                }
+                enqueue(ld);
+            } else if (auto* st = dyn_cast<StoreInst>(user)) {
+                if (stripInChainPtrCasts(st->getPointerOperand()) != v &&
+                    st->getPointerOperand() != v) {
+                    continue;
+                }
+                enqueue(st);
+            }
+        }
+    }
+
+    while (!q.empty()) {
+        Value* x = q.pop_back_val();
+        Instruction* ix = dyn_cast<Instruction>(x);
+        if (ix && value_cache.has(ix) && value_cache.getShape(ix).isVarying()) {
+            return true;
+        }
+        for (Use& use : x->uses()) {
+            User* user = use.getUser();
+            if (auto* inst = dyn_cast<Instruction>(user)) {
+                enqueue(inst);
+            }
+        }
+    }
+    return false;
+}
+
+void eraseUnusedInRegion(const DenseSet<Value*>& region,
+                         std::vector<llvm::Instruction*>& instruction_order) {
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        SmallVector<Instruction*, 16> dead;
+        SmallVector<Value*, 32> keys(region.begin(), region.end());
+        for (Value* v : keys) {
+            Instruction* i = dyn_cast<Instruction>(v);
+            if (!i || !i->getParent() || !i->use_empty()) {
+                continue;
+            }
+            if (isa<GetElementPtrInst>(i) || isa<BitCastInst>(i)) {
+                dead.push_back(i);
+            }
+        }
+        for (Instruction* i : dead) {
+            auto it = std::find(instruction_order.begin(),
+                                instruction_order.end(), i);
+            if (it != instruction_order.end()) {
+                instruction_order.erase(it);
+            }
+            i->eraseFromParent();
+            changed = true;
+        }
+    }
+}
+
+}  // namespace
+
+void ShapesStep::structSoaLayoutOpt() {
+    LLVMContext& ctx = vf_info.ctx;
+    Type* i32 = Type::getInt32Ty(ctx);
+    Value* zero = ConstantInt::get(i32, 0);
+    Function* lane_fn = vf_info.mod->getFunction("psim_get_lane_num");
+    if (!lane_fn) {
+        return;
+    }
+
+    SmallVector<AllocaInst*, 16> candidates;
+    for (Instruction* inst : vf_info.instruction_order) {
+        if (AllocaInst* a = dyn_cast<AllocaInst>(inst)) {
+            candidates.push_back(a);
+        }
+    }
+
+    for (AllocaInst* a : candidates) {
+        if (!a->getParent()) {
+            continue;
+        }
+        if (!a->getAllocatedType()->isStructTy()) {
+            continue;
+        }
+        ConstantInt* asz = dyn_cast<ConstantInt>(a->getArraySize());
+        if (!asz || !asz->isOne()) {
+            continue;
+        }
+        if (value_cache.getArrayLayoutOpt(a)) {
+            continue;
+        }
+
+        auto* st = cast<StructType>(a->getAllocatedType());
+        std::vector<std::vector<unsigned>> leaf_paths;
+        if (!flattenStructLeaves(st, {}, leaf_paths) || leaf_paths.empty()) {
+            continue;
+        }
+
+        eraseLifetimeUsers(a, vf_info.instruction_order);
+
+        DenseSet<Value*> region;
+        if (!buildAllocaReachableRegion(a, region)) {
+            continue;
+        }
+
+        if (!anyVaryingDerivedFromRegionLoads(region, value_cache)) {
+            continue;
+        }
+
+        SmallVector<GetElementPtrInst*, 16> leaf_geps;
+        for (Value* v : region) {
+            auto* g = dyn_cast<GetElementPtrInst>(v);
+            if (!g) {
+                continue;
+            }
+            Type* res_elt = g->getResultElementType();
+            if (!isPrimitiveLeafType(res_elt)) {
+                continue;
+            }
+            SmallVector<unsigned, 8> path;
+            if (!collectFullStructFieldPath(a, g, path)) {
+                continue;
+            }
+            if (!leafIndexForPath(leaf_paths, path)) {
+                continue;
+            }
+            leaf_geps.push_back(g);
+        }
+        if (leaf_geps.empty()) {
+            continue;
+        }
+
+        std::vector<AllocaInst*> leaf_allocas;
+        leaf_allocas.reserve(leaf_paths.size());
+        Instruction* ir_insert = a;
+        auto order_insert =
+            std::find(vf_info.instruction_order.begin(),
+                      vf_info.instruction_order.end(), a);
+        if (order_insert != vf_info.instruction_order.end()) {
+            ++order_insert;
+        }
+
+        for (unsigned li = 0; li < leaf_paths.size(); ++li) {
+            Type* leaf_ty = st;
+            for (unsigned idx : leaf_paths[li]) {
+                leaf_ty = cast<StructType>(leaf_ty)->getElementType(idx);
+            }
+            Type* arr_ty = ArrayType::get(leaf_ty, num_lanes);
+            AllocaInst* na = new AllocaInst(arr_ty, 0, asz, a->getAlign(),
+                                            a->getName() + ".soa." +
+                                                Twine(li));
+            na->insertAfter(ir_insert);
+            ir_insert = na;
+            leaf_allocas.push_back(na);
+
+            z3::expr base = Shape::symbolicExpr(
+                vf_info.z3_ctx, na->getName().str(), getValueSizeBits(na));
+            value_cache.setShape(na, Shape::Uniform(base, num_lanes));
+            value_cache.setStructSoaLayoutOpt(na);
+
+            if (order_insert != vf_info.instruction_order.end()) {
+                order_insert =
+                    std::next(vf_info.instruction_order.insert(order_insert, na));
+            } else {
+                vf_info.instruction_order.push_back(na);
+            }
+        }
+
+        SmallVector<GetElementPtrInst*, 16> new_geps;
+        for (GetElementPtrInst* g : leaf_geps) {
+            SmallVector<unsigned, 8> path;
+            if (!collectFullStructFieldPath(a, g, path)) {
+                continue;
+            }
+            std::optional<unsigned> li = leafIndexForPath(leaf_paths, path);
+            if (!li) {
+                continue;
+            }
+            AllocaInst* na = leaf_allocas[*li];
+            Type* arr_ty = cast<ArrayType>(na->getAllocatedType());
+
+            CallInst* lane_call = CallInst::Create(
+                lane_fn->getFunctionType(), lane_fn, ArrayRef<Value*>(),
+                g->getName() + ".lane", g);
+            auto git = std::find(vf_info.instruction_order.begin(),
+                                 vf_info.instruction_order.end(), g);
+            if (git != vf_info.instruction_order.end()) {
+                vf_info.instruction_order.insert(git, lane_call);
+            } else {
+                vf_info.instruction_order.push_back(lane_call);
+            }
+
+            GetElementPtrInst* new_gep = GetElementPtrInst::Create(
+                arr_ty, na, {zero, lane_call}, g->getName() + ".soa.gep");
+            new_gep->insertAfter(lane_call);
+            auto nit = std::find(vf_info.instruction_order.begin(),
+                                 vf_info.instruction_order.end(), lane_call);
+            if (nit != vf_info.instruction_order.end()) {
+                vf_info.instruction_order.insert(std::next(nit), new_gep);
+            } else {
+                vf_info.instruction_order.push_back(new_gep);
+            }
+
+            new_geps.push_back(new_gep);
+            g->replaceAllUsesWith(new_gep);
+            auto git2 = std::find(vf_info.instruction_order.begin(),
+                                  vf_info.instruction_order.end(), g);
+            if (git2 != vf_info.instruction_order.end()) {
+                vf_info.instruction_order.erase(git2);
+            }
+            g->eraseFromParent();
+        }
+
+        eraseUnusedInRegion(region, vf_info.instruction_order);
+
+        if (a->use_empty()) {
+            auto ait = std::find(vf_info.instruction_order.begin(),
+                                 vf_info.instruction_order.end(), a);
+            if (ait != vf_info.instruction_order.end()) {
+                vf_info.instruction_order.erase(ait);
+            }
+            a->eraseFromParent();
+        }
+
+        auto drain_shape_queue =
+            [&](std::unordered_set<Instruction*>& wq, Instruction* root) {
+                calculateShape(wq, root, true);
+                while (!wq.empty()) {
+                    Instruction* wi = *wq.begin();
+                    wq.erase(wq.begin());
+                    calculateShape(wq, wi, true);
+                }
+            };
+
+        for (GetElementPtrInst* ng : new_geps) {
+            CallInst* lane_c =
+                dyn_cast<CallInst>(ng->getOperand(ng->getNumOperands() - 1));
+            std::unordered_set<Instruction*> wq;
+            if (lane_c) {
+                drain_shape_queue(wq, lane_c);
+            }
+            drain_shape_queue(wq, ng);
+            for (User* u : ng->users()) {
+                Instruction* ui = dyn_cast<Instruction>(u);
+                if (!ui) {
+                    continue;
+                }
+                std::unordered_set<Instruction*> wq2;
+                drain_shape_queue(wq2, ui);
+            }
+        }
+    }
+}
+
 Shape ShapesStep::calculateShapeCmp(ICmpInst* cmp) {
     Value* a = cmp->getOperand(0);
     Value* b = cmp->getOperand(1);
@@ -1096,6 +1552,9 @@ void ShapesStep::calculateShape(std::unordered_set<Instruction*>& work_queue,
     } else if (freeze) {
         shape = value_cache.getShape(freeze->getOperand(0));
     } else if (alloca && value_cache.has(alloca) &&
+               value_cache.getStructSoaLayoutOpt(alloca)) {
+        return;
+    } else if (alloca && value_cache.has(alloca) &&
                value_cache.getArrayLayoutOpt(alloca)) {
         // We have already calculated shape for this alloca.
         return;
@@ -1279,6 +1738,8 @@ void ShapesStep::calculate() {
         calculateShape(work_queue, *it, true);
         work_queue.erase(it);
     }
+
+    structSoaLayoutOpt();
 
     calulateFinalMemInstMappedShapes();
 

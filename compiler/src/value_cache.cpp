@@ -43,6 +43,14 @@ void ValueCache::setArrayLayoutOpt(Value* value) {
     it->second.arrayLayoutOpt = true;
 }
 
+void ValueCache::setStructSoaLayoutOpt(Value* value) {
+    auto it = entries.find(value);
+    if (it == entries.end()) {
+        FATAL("Value cache entry for " << *value << " does not exist\n");
+    }
+    it->second.structSoaLayoutOpt = true;
+}
+
 void ValueCache::setVectorValue(Value* value, Value* vector_value) {
     auto it = entries.find(value);
     if (it == entries.end()) {
@@ -224,6 +232,10 @@ Shape ValueCache::getShape(Value* value) { return get(value).shape; }
 
 bool ValueCache::getArrayLayoutOpt(Value* value) {
     return get(value).arrayLayoutOpt;
+}
+
+bool ValueCache::getStructSoaLayoutOpt(Value* value) {
+    return get(value).structSoaLayoutOpt;
 }
 
 MemInstMappedShape ValueCache::getMemInstMappedShape(Instruction* inst) {

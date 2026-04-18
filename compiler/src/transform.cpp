@@ -1278,6 +1278,9 @@ Value* TransformStep::transformAlloca(AllocaInst* inst) {
         vf_info.diagnostics.unoptimized_allocas.push_back(valueString(inst));
     }
 
+    if (value_cache.getStructSoaLayoutOpt(inst)) {
+        return transformInstructionWithoutVectorizing(inst);
+    }
     if (value_cache.getArrayLayoutOpt(inst)) {
         return transformInstructionWithoutVectorizing(inst);
     }

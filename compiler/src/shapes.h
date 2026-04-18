@@ -56,6 +56,7 @@ class ShapesStep {
     Shape calculateShapeExt(llvm::Instruction* ext, bool is_signed);
 
     void arrayLayoutOpt();
+    void structSoaLayoutOpt();
     bool analyzeUses(llvm::Instruction* inst);
     llvm::Instruction* generateOptInsts(
         llvm::AllocaInst* inst,

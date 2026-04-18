@@ -79,11 +79,20 @@ string(REPLACE "-DNDEBUG" "" CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_R
 
 llvm_map_components_to_libnames(llvm_libs support core irreader analysis scalaropts passes transformutils demangle)
 target_link_libraries(psv ${llvm_libs})
-target_link_libraries(psv "${Z3_INSTALL_DIR}/lib/libz3.so")
+find_library(
+    Z3_LIBRARY
+    NAMES z3
+    PATHS "${Z3_INSTALL_DIR}/lib" "${Z3_INSTALL_DIR}/lib/x86_64-linux-gnu"
+          /usr/lib/x86_64-linux-gnu /usr/lib
+    NO_DEFAULT_PATH)
+if(NOT Z3_LIBRARY)
+    find_library(Z3_LIBRARY NAMES z3 REQUIRED)
+endif()
+target_link_libraries(psv ${Z3_LIBRARY})
 
 # shape_checker shouldn't really need llvm_libs, but utils adds that dependency...
 target_link_libraries(shape_checker ${llvm_libs})
-target_link_libraries(shape_checker "${Z3_INSTALL_DIR}/lib/libz3.so")
+target_link_libraries(shape_checker ${Z3_LIBRARY})
 
 install(TARGETS psv DESTINATION bin)
 install(TARGETS shape_checker DESTINATION bin)

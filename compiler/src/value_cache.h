@@ -39,11 +39,13 @@ class ValueCache {
     void setShape(llvm::Value* value, Shape shape, bool overwrite = false);
     void setToBeDeleted(llvm::Value* value);
     void setArrayLayoutOpt(llvm::Value* value);
+    void setStructSoaLayoutOpt(llvm::Value* value);
 
     llvm::Value* getScalarValue(llvm::Value* value);
     llvm::Value* getVectorValue(llvm::Value* value);
     Shape getShape(llvm::Value* value);
     bool getArrayLayoutOpt(llvm::Value* value);
+    bool getStructSoaLayoutOpt(llvm::Value* value);
     MemInstMappedShape getMemInstMappedShape(llvm::Instruction* inst);
     void setMemInstMappedShape(llvm::Instruction* inst,
                                MemInstMappedShape minst_mapping);
@@ -60,7 +62,8 @@ class ValueCache {
               shape(shape),
               to_be_deleted(false),
               already_deleted(false),
-              arrayLayoutOpt(false) {}
+              arrayLayoutOpt(false),
+              structSoaLayoutOpt(false) {}
 
         // the non-vectorized IR representation of uniform and strided shapes.
         // for strided shapes, this is the base element.
@@ -78,6 +81,7 @@ class ValueCache {
         bool to_be_deleted;
         bool already_deleted;
         bool arrayLayoutOpt;
+        bool structSoaLayoutOpt;
     };
 
     ValueCacheEntry& get(llvm::Value* value);

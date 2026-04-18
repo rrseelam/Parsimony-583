@@ -6,3 +6,7 @@ ispc-v1.18.0-linux/
 build/
 tmp/
 install/
+bin/
+tmp_env/
+tmp_aos_to_soa/
+

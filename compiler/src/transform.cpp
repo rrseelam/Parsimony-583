@@ -39,6 +39,18 @@ namespace ps {
 unsigned transform_verbosity_level;
 [[maybe_unused]] static unsigned& verbosity_level = transform_verbosity_level;
 
+namespace {
+
+constexpr int kStructSoAUniformCost = 0;
+constexpr int kStructSoAPackedCost = 1;
+constexpr int kStructSoAPackedShuffleCost = 2;
+constexpr int kStructSoAGatherScatterCost = 4;
+constexpr int kStructSoAVaryingMemOpCost = 1;
+constexpr int kStructSoABasePenalty = 2;
+constexpr int kStructSoAUnusedFieldPenalty = 1;
+
+}  // namespace
+
 TransformStep::TransformStep(VectorizedFunctionInfo& vf_info)
     : vf_info(vf_info),
       value_cache(vf_info.value_cache),
@@ -1329,6 +1341,126 @@ bool TransformStep::isSoASafe(AllocaInst* inst) {
     return true;
 }
 
+MemInstMappedShape::MappedShape TransformStep::classifyMemOpShape(Shape& shape,
+                                                                  size_t elem_size) {
+    if (shape.isUniform()) {
+        return MemInstMappedShape::UNIFORM;
+    }
+    if (shape.isStrided() && shape.getStride() == elem_size) {
+        return MemInstMappedShape::PACKED;
+    }
+    if (shape.isGangPacked(elem_size) && global_opts.scalable_size == 0) {
+        for (unsigned i = 0; i < shape.indices.size(); i++) {
+            if (shape.getIndexAsInt(i) % elem_size != 0) {
+                return MemInstMappedShape::GATHER_SCATTER;
+            }
+        }
+        return MemInstMappedShape::PACKED_SHUFFLE;
+    }
+    return MemInstMappedShape::GATHER_SCATTER;
+}
+
+int TransformStep::getAoSMemOpCost(
+    MemInstMappedShape::MappedShape mapped_shape) {
+    switch (mapped_shape) {
+        case MemInstMappedShape::UNIFORM:
+            return kStructSoAUniformCost;
+        case MemInstMappedShape::PACKED:
+        case MemInstMappedShape::ALREADY_PACKED:
+            return kStructSoAPackedCost;
+        case MemInstMappedShape::PACKED_SHUFFLE:
+            return kStructSoAPackedShuffleCost;
+        case MemInstMappedShape::GATHER_SCATTER:
+            return kStructSoAGatherScatterCost;
+        default:
+            return kStructSoAGatherScatterCost;
+    }
+}
+
+int TransformStep::getSoAMemOpCost(Shape& shape) {
+    if (shape.isUniform()) {
+        return kStructSoAUniformCost;
+    }
+    return kStructSoAVaryingMemOpCost;
+}
+
+bool TransformStep::shouldTransformStructAllocaSoA(AllocaInst* inst,
+                                                   StructType* sty) {
+    int aos_total = 0;
+    int soa_total = 0;
+    int penalty_total = kStructSoABasePenalty;
+    std::vector<bool> field_has_mem_use(sty->getNumElements(), false);
+    unsigned mem_op_count = 0;
+
+    for (User* U : inst->users()) {
+        auto* gep = dyn_cast<GetElementPtrInst>(U);
+        if (!gep) continue;
+
+        auto idx_it = gep->idx_begin();
+        if (idx_it == gep->idx_end()) continue;
+        ++idx_it;  // skip the leading 0 index into the struct pointer
+        if (idx_it == gep->idx_end()) continue;
+
+        auto* field_idx_const = dyn_cast<ConstantInt>(*idx_it);
+        ASSERT(field_idx_const,
+               "AoS-to-SoA heuristic: non-constant field index in struct GEP "
+                   << *gep);
+
+        unsigned field_idx = field_idx_const->getZExtValue();
+        ASSERT(field_idx < sty->getNumElements(),
+               "AoS-to-SoA heuristic: field index out of range " << field_idx);
+
+        for (User* GU : gep->users()) {
+            auto* mem_inst = dyn_cast<Instruction>(GU);
+            if (!isa<LoadInst>(GU) && !isa<StoreInst>(GU)) {
+                continue;
+            }
+
+            Type* mem_ty = isa<LoadInst>(GU)
+                               ? cast<LoadInst>(GU)->getType()
+                               : cast<StoreInst>(GU)->getValueOperand()->getType();
+            TypeSize type_size =
+                vf_info.data_layout.getTypeAllocSize(mem_ty->getScalarType());
+            size_t elem_size = type_size.getFixedSize();
+            Shape gep_shape = value_cache.getShape(gep);
+            auto mapped_shape = classifyMemOpShape(gep_shape, elem_size);
+            int aos_cost = getAoSMemOpCost(mapped_shape);
+            int soa_cost = getSoAMemOpCost(gep_shape);
+
+            aos_total += aos_cost;
+            soa_total += soa_cost;
+            field_has_mem_use[field_idx] = true;
+            mem_op_count++;
+
+            PRINT_HIGH("AoS-to-SoA heuristic: mem op " << *mem_inst
+                                                       << " classified as "
+                                                       << mapped_shape
+                                                       << " with AoS cost "
+                                                       << aos_cost
+                                                       << " and SoA cost "
+                                                       << soa_cost);
+        }
+    }
+
+    if (mem_op_count == 0) {
+        PRINT_HIGH("AoS-to-SoA heuristic: no direct load/store users found for "
+                   << *inst << ", skipping");
+        return false;
+    }
+
+    for (bool has_mem_use : field_has_mem_use) {
+        if (!has_mem_use) {
+            penalty_total += kStructSoAUnusedFieldPenalty;
+        }
+    }
+
+    PRINT_HIGH("AoS-to-SoA heuristic for " << *inst << ": aos_total="
+                                           << aos_total << ", soa_total="
+                                           << soa_total << ", penalty_total="
+                                           << penalty_total);
+    return aos_total > soa_total + penalty_total;
+}
+
 Value* TransformStep::transformStructAllocaSoA(AllocaInst* inst) {
     StructType* sty = cast<StructType>(inst->getAllocatedType());
     unsigned num_fields = sty->getNumElements();
@@ -1414,7 +1546,7 @@ Value* TransformStep::transformAlloca(AllocaInst* inst) {
     if (inst->getAllocatedType()->isStructTy()) {
         StructType* sty = cast<StructType>(inst->getAllocatedType());
         if (isFlatStructType(sty) && hasVaryingGEPUser(inst) &&
-            isSoASafe(inst)) {
+            isSoASafe(inst) && shouldTransformStructAllocaSoA(inst, sty)) {
             Value* result = transformStructAllocaSoA(inst);
             if (result) return result;
         }

@@ -54,6 +54,12 @@ class TransformStep {
     bool isFlatStructType(llvm::StructType* sty);
     bool hasVaryingGEPUser(llvm::AllocaInst* inst);
     bool isSoASafe(llvm::AllocaInst* inst);
+    MemInstMappedShape::MappedShape classifyMemOpShape(Shape& shape,
+                                                       size_t elem_size);
+    int getAoSMemOpCost(MemInstMappedShape::MappedShape mapped_shape);
+    int getSoAMemOpCost(Shape& shape);
+    bool shouldTransformStructAllocaSoA(llvm::AllocaInst* inst,
+                                        llvm::StructType* sty);
     llvm::Value* transformStructAllocaSoA(llvm::AllocaInst* inst);
     llvm::Value* transformBranch(llvm::BranchInst* inst);
 

@@ -13,6 +13,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
 
 #include "shape.h"
@@ -50,6 +51,10 @@ class TransformStep {
         llvm::Instruction* inst);
     llvm::Value* transformSimpleInstruction(llvm::Instruction* inst);
     llvm::Value* transformAlloca(llvm::AllocaInst* inst);
+    bool isFlatStructType(llvm::StructType* sty);
+    bool hasVaryingGEPUser(llvm::AllocaInst* inst);
+    bool isSoASafe(llvm::AllocaInst* inst);
+    llvm::Value* transformStructAllocaSoA(llvm::AllocaInst* inst);
     llvm::Value* transformBranch(llvm::BranchInst* inst);
 
     /* Transform calls group */

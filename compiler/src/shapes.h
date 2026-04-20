@@ -59,11 +59,9 @@ class ShapesStep {
     bool analyzeUses(llvm::Instruction* inst);
     llvm::Instruction* generateOptInsts(
         llvm::AllocaInst* inst,
-        std::vector<std::pair<llvm::Instruction*, llvm::Instruction*>>&
-            toReplace);
+        std::set<std::pair<llvm::Instruction*, llvm::Instruction*>>& toReplace);
     void insertOptInsts(
-        std::vector<std::pair<llvm::Instruction*, llvm::Instruction*>>&
-            toReplace);
+        std::set<std::pair<llvm::Instruction*, llvm::Instruction*>>& toReplace);
 
     void calulateFinalMemInstMappedShapes();
     void printShapes();

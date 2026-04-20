@@ -711,6 +711,9 @@ void ShapesStep::arrayLayoutOpt() {
         if (alloca->user_empty()) continue;
         ArrayType* ty = dyn_cast<ArrayType>(alloca->getAllocatedType());
         if (!ty) continue;
+        // Multidimensional arrays already encode an inner element layout, so
+        // blindly appending another lane dimension changes indexing semantics.
+        if (ty->getElementType()->isArrayTy()) continue;
         if (ty->getElementType()->isStructTy()) continue;
         if (!analyzeUses(I)) continue;
         PRINT_HIGH("Array layout Opt -- Optimizing alloca " << *alloca);

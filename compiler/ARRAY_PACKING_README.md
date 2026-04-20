@@ -97,6 +97,248 @@ The most important updated routines are:
 - `ShapesStep::generateOptInsts()`
 - `ShapesStep::insertOptInsts()`
 
+## Observed Test Results
+
+The following results were collected on Ubuntu by running the standard test
+driver from `compiler/tests`:
+
+```bash
+./run.sh alloca.cpp
+./run.sh gep_test1.cpp
+./run.sh gep_test2.cpp
+./run.sh packed_shuffle.cpp
+./run.sh array_packing_perf.cpp
+```
+
+The observed output was:
+
+```text
+./run.sh alloca.cpp
+alloca.cpp
+parsimony -O3 -march=native -I../../apps/synet-simd/src alloca.cpp -o bin/alloca --Xpsv="" --Xtmp tmp
+alloca: alloca.cpp:41: int main(): Assertion `sum == ref_sum' failed.
+./run.sh: line 28: 22667 Aborted                 (core dumped) ./bin/$BIN
+
+./run.sh gep_test1.cpp
+gep_test1.cpp
+parsimony -O3 -march=native -I../../apps/synet-simd/src gep_test1.cpp -o bin/gep_test1 --Xpsv="" --Xtmp tmp
+Success!
+
+./run.sh gep_test2.cpp
+gep_test2.cpp
+parsimony -O3 -march=native -I../../apps/synet-simd/src gep_test2.cpp -o bin/gep_test2 --Xpsv="" --Xtmp tmp
+Success!
+
+./run.sh packed_shuffle.cpp
+packed_shuffle.cpp
+parsimony -O3 -march=native -I../../apps/synet-simd/src packed_shuffle.cpp -o bin/packed_shuffle --Xpsv="" --Xtmp tmp
+WARNING: packed_shuffle.cpp:44:16 scatter/gather emitted
+Success!
+
+./run.sh array_packing_perf.cpp
+array_packing_perf.cpp
+parsimony -O3 -march=native -I../../apps/synet-simd/src array_packing_perf.cpp -o bin/array_packing_perf --Xpsv="" --Xtmp tmp
+WARNING: array_packing_perf.cpp:52:27 scatter/gather emitted
+array_packing_perf total_us: 1410703.00
+array_packing_perf avg_us: 352.6757
+array_packing_perf checksum: 139903857411
+Success!
+```
+
+### Result Summary
+
+- `gep_test1.cpp`: passed
+- `gep_test2.cpp`: passed
+- `packed_shuffle.cpp`: passed, but emitted a scatter/gather warning
+- `array_packing_perf.cpp`: passed, produced stable timing output and checksum,
+  but emitted one scatter/gather warning
+- `alloca.cpp`: failed its final correctness assertion
+
+This pattern is important. The optimization is working for the regular
+GEP-based cases it was designed to improve, and the performance benchmark is
+both correct and measurable. The only regression in this test set is the local
+array initialization case in `alloca.cpp`.
+
+## Why `alloca.cpp` Fails
+
+The failing test is:
+
+```cpp
+uint8_t data[12] = {};
+```
+
+inside a `#psim` region. That matters because the array-packing optimization
+changes the layout of eligible local arrays from:
+
+- `[N x T]`
+
+to:
+
+- `[N x [num_lanes x T]]`
+
+and then rewrites pointer derivations to index with `psim_get_lane_num()` as
+the innermost dimension.
+
+That transformation is correct in principle, but it also means the rewritten
+allocation is a different object with:
+
+- a different size
+- a different physical layout
+- different byte offsets for element accesses
+
+The likely reason `alloca.cpp` fails is that the declaration `uint8_t data[12] =
+{};` is typically lowered by LLVM into a zero-initialization intrinsic such as
+`memset`. Rewriting only the direct GEP-style address computations is not
+sufficient in that case. Any intrinsic or other size-sensitive use of the
+original alloca must also be rewritten to match the packed object.
+
+If the alloca is packed but the initialization pattern is still tied to the old
+layout, then one of two things can happen:
+
+- only part of the new packed array is initialized
+- the initialization happens with the wrong byte interpretation for the new
+  layout
+
+Either way, the subsequent updates:
+
+```cpp
+for (int i = 0; i < 12; i++) {
+    data[i] += lane * i;
+}
+```
+
+start from incorrect values, so the final reduction in `main()` no longer
+matches the scalar reference. That explains why compilation succeeds but the
+program aborts at:
+
+```cpp
+assert(sum == ref_sum);
+```
+
+### Theoretical Takeaway
+
+Array packing is a memory-layout transformation, not just a pointer rewrite. In
+compiler terms, that means correctness depends on updating all uses whose
+behavior depends on the allocation's shape, including:
+
+- GEP chains
+- bitcasts
+- nested pointer derivations
+- intrinsics such as `memset` or `memcpy`
+- any other operation whose semantics depend on the original object size or
+  byte layout
+
+If even one use still assumes the old layout while the rest of the IR uses the
+new packed layout, the transformed program can silently compute the wrong
+result. The `alloca.cpp` regression is strong evidence that array
+initialization/intrinsic handling is still incomplete for the packed local-array
+case.
+
+## Interpreting the Benchmark Results
+
+The dedicated microbenchmark in `compiler/tests/array_packing_perf.cpp` is a
+good stress test for this optimization because it repeatedly:
+
+- allocates a stack-local array inside a `#psim` region
+- writes every element of the local array
+- repeatedly reads and updates nearby elements
+- checks correctness against a scalar reference implementation
+- times many repeated kernel invocations
+
+The benchmark kernel uses:
+
+- `GANG_SIZE = 64`
+- `LOCAL_ARRAY_SIZE = 128`
+- `INNER_ITERS = 128`
+- `REPEATS = 4000`
+
+The hot loop repeatedly fills `local[i]` and then updates it using neighboring
+entries:
+
+```cpp
+uint32_t mix = local[i - 1] + local[i] + local[i + 1];
+acc = (acc * 33u) ^ (mix + (uint32_t)i + lane);
+local[i] = acc ^ (uint32_t)(r + i);
+```
+
+This is exactly the kind of access pattern array packing is meant to help. For
+a fixed logical index `i`, all lanes are touching the same logical element of
+their own private local arrays. After packing, those per-lane values become
+adjacent in memory. That makes later vectorization and memory-lowering passes
+more likely to recognize the accesses as packed vector memory operations rather
+than falling back to gathers and scatters.
+
+### What the numbers mean
+
+The benchmark reported:
+
+- `total_us: 1410703.00`
+- `avg_us: 352.6757`
+- `checksum: 139903857411`
+- `Success!`
+
+These values should be interpreted as follows:
+
+- `Success!` means the optimized kernel matched the scalar reference
+- `checksum` confirms deterministic output for the measured run
+- `avg_us` is the primary runtime metric to compare across compiler versions
+- `total_us` is a useful aggregate sanity check over all repeats
+
+With `REPEATS = 4000`, the average time per kernel invocation is about
+`352.7 us`. By itself, that number is not a speedup claim, because a true
+performance claim requires comparison against a baseline compiler version
+without the optimization. However, it does show that the packed-array path runs
+correctly and efficiently enough to measure on a realistic repeated workload.
+
+### Why there is still a scatter/gather warning
+
+The benchmark emitted:
+
+```text
+WARNING: array_packing_perf.cpp:52:27 scatter/gather emitted
+```
+
+That warning comes from memory lowering, where the compiler falls back to masked
+gather/scatter operations when it cannot prove the access is a clean packed
+vector load/store.
+
+In this benchmark, the warning is not surprising. The final access:
+
+```cpp
+out[lane] = acc + local[lane % LOCAL_ARRAY_SIZE];
+```
+
+uses an index that depends on `lane`, so different lanes may read different
+positions. That kind of lane-dependent access is inherently less regular than
+the uniform inner-loop accesses and is a natural candidate for a gather.
+
+The important point is that the irregular access happens at the end of the
+kernel, while the dominant inner-loop traffic uses regular index patterns that
+are much better suited to packed lowering. So the presence of one
+scatter/gather warning does not mean the optimization failed; it means the
+benchmark still contains one intentionally irregular memory access.
+
+## Overall Interpretation
+
+The observed results support the following conclusions:
+
+- the array-packing transformation helps the regular local-array and GEP-style
+  cases it was intended to optimize
+- the dedicated performance benchmark validates that the transformed code is
+  still correct on a hot local-array workload
+- the emitted scatter/gather warnings show that irregular lane-dependent
+  accesses still fall back to more expensive memory operations, which is
+  expected
+- the remaining correctness gap is `alloca.cpp`, which likely exposes missing
+  rewriting for zero-initialization or other intrinsic-based uses of a packed
+  alloca
+
+In short, the current implementation appears to be effective for regular packed
+access patterns and promising for performance, but it is not yet fully complete
+for all stack-array cases. The next correctness step is to make sure that
+initialization-related uses of rewritten allocas are transformed consistently
+with the new packed layout.
+
 ## How To Test
 
 This section gives a consolidated workflow for testing the array-packing change on both the general compiler tests and the dedicated performance microbenchmark.

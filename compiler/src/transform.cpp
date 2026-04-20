@@ -1032,6 +1032,36 @@ Value* TransformStep::transformCallIntrinsic(llvm::CallInst* inst) {
 
     if (intrinsic_id == Intrinsic::memcpy ||
         intrinsic_id == Intrinsic::memset) {
+        if (intrinsic_id == Intrinsic::memset) {
+            Value* dst = inst->getArgOperand(0);
+            Shape dst_shape = value_cache.getShape(dst);
+            Value* value = inst->getArgOperand(1);
+            Value* len = inst->getArgOperand(2);
+            Value* is_volatile = inst->getArgOperand(3);
+
+            if (dst_shape.isIndexed() && dst_shape.getMinIndex() == 0 &&
+                dst_shape.getMaxIndex() == (int64_t)num_lanes - 1 &&
+                !value_cache.getShape(value).isVarying() &&
+                !value_cache.getShape(len).isVarying()) {
+                IRBuilder<> builder(inst);
+                Value* packed_dst = value_cache.getScalarValue(dst);
+                Value* packed_value = value_cache.getScalarValue(value);
+                Value* packed_len = value_cache.getScalarValue(len);
+                Value* total_len = builder.CreateMul(
+                    packed_len,
+                    ConstantInt::get(packed_len->getType(), num_lanes),
+                    inst->getName() + ".packed_len");
+                auto* memset = builder.CreateMemSet(
+                    packed_dst, packed_value, total_len, MaybeAlign(1),
+                    cast<ConstantInt>(is_volatile)->isOne());
+                if (inst->getDebugLoc()) {
+                    memset->setDebugLoc(inst->getDebugLoc());
+                }
+                value_cache.setToBeDeleted(inst);
+                return nullptr;
+            }
+        }
+
         // TODO: elision/merging
         return vectorizeUniformCall(inst);
     }

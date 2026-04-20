@@ -650,6 +650,10 @@ void ShapesStep::arrayLayoutOpt() {
         if (!alloca) continue;
         ArrayType* ty = dyn_cast<ArrayType>(alloca->getAllocatedType());
         if (!ty) continue;
+        // Restrict array packing to 1D arrays. For multidimensional arrays, a
+        // single GEP may already index the inner array dimension, so blindly
+        // appending the lane index changes the intended addressing.
+        if (ty->getElementType()->isArrayTy()) continue;
         if (ty->getElementType()->isStructTy()) continue;
         if (!analyzeUses(I)) continue;
         PRINT_HIGH("Array layout Opt -- Optimizing alloca " << *alloca);

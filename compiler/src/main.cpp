@@ -67,6 +67,9 @@ int main(int argc, char** argv) {
         reader.hasOption("-Werror", "Treat the warnings as errors");
     global_opts.ignore_warn_set = reader.hasOption(
         "-Iwarnset", "Ignore set of warning on/off inside the application");
+    global_opts.disable_array_packing = reader.hasOption(
+        "-fno-array-packing",
+        "Disable array layout optimization for stack arrays");
 
     unsigned verbosity_level = 0;
     reader.readOption<unsigned>("-v", verbosity_level, "Global verbosity flag");

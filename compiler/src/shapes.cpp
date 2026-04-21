@@ -1270,7 +1270,11 @@ void ShapesStep::calculate() {
         shape_constants[name] = &v;
     }
 
-    arrayLayoutOpt();
+    if (global_opts.disable_array_packing) {
+        PRINT_LOW("Skipping array layout optimization");
+    } else {
+        arrayLayoutOpt();
+    }
 
     for (Instruction* I : vf_info.instruction_order) {
         calculateShape(work_queue, I);

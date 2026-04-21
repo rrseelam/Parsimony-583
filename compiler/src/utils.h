@@ -60,6 +60,7 @@ typedef struct global_opts_t {
     bool add_prints;
     bool error_on_warn;
     bool ignore_warn_set;
+    bool disable_array_packing;
     int scalable_size;
 } global_opts_t;
 

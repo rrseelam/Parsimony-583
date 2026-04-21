@@ -1,0 +1,183 @@
+{
+  "source": "/home/ubuntu/583/Parsimony-583/compiler/tests/array_packing_perf.cpp",
+  "runs": 9,
+  "warmup_runs": 1,
+  "comparison": {
+    "packing_disabled": {
+      "variant": "packing_disabled",
+      "warmup_runs": [
+        {
+          "avg_us": 6354.8235,
+          "total_us": 25419294.0,
+          "checksum": 139903857411
+        }
+      ],
+      "runs": [
+        {
+          "avg_us": 6725.6615,
+          "total_us": 26902646.0,
+          "checksum": 139903857411,
+          "run_index": 1
+        },
+        {
+          "avg_us": 5899.6992,
+          "total_us": 23598797.0,
+          "checksum": 139903857411,
+          "run_index": 2
+        },
+        {
+          "avg_us": 5649.7013,
+          "total_us": 22598805.0,
+          "checksum": 139903857411,
+          "run_index": 3
+        },
+        {
+          "avg_us": 6811.6055,
+          "total_us": 27246422.0,
+          "checksum": 139903857411,
+          "run_index": 4
+        },
+        {
+          "avg_us": 6028.9305,
+          "total_us": 24115722.0,
+          "checksum": 139903857411,
+          "run_index": 5
+        },
+        {
+          "avg_us": 5048.9888,
+          "total_us": 20195955.0,
+          "checksum": 139903857411,
+          "run_index": 6
+        },
+        {
+          "avg_us": 5916.9468,
+          "total_us": 23667787.0,
+          "checksum": 139903857411,
+          "run_index": 7
+        },
+        {
+          "avg_us": 6616.635,
+          "total_us": 26466540.0,
+          "checksum": 139903857411,
+          "run_index": 8
+        },
+        {
+          "avg_us": 5967.0785,
+          "total_us": 23868314.0,
+          "checksum": 139903857411,
+          "run_index": 9
+        }
+      ],
+      "checksum": 139903857411,
+      "median_avg_us": 5967.0785,
+      "mean_avg_us": 6073.916344444445,
+      "min_avg_us": 5048.9888,
+      "max_avg_us": 6811.6055,
+      "p10_avg_us": 5529.5588,
+      "p90_avg_us": 6742.8503,
+      "stdev_avg_us": 565.9466135272547,
+      "scatter_gather_warnings": 6,
+      "compile_command": [
+        "parsimony",
+        "-O3",
+        "-march=native",
+        "-mprefer-vector-width=512",
+        "-I/home/ubuntu/583/Parsimony-583/apps/synet-simd/src",
+        "array_packing_perf.cpp",
+        "-o",
+        "/home/ubuntu/583/Parsimony-583/compiler/tests/comparison_results/bin/array_packing_perf_packing_off",
+        "--Xpsv=-fno-array-packing",
+        "--Xtmp=/home/ubuntu/583/Parsimony-583/compiler/tests/comparison_results/tmp/packing_off"
+      ]
+    },
+    "packing_enabled": {
+      "variant": "packing_enabled",
+      "warmup_runs": [
+        {
+          "avg_us": 511.24,
+          "total_us": 2044960.0,
+          "checksum": 139903857411
+        }
+      ],
+      "runs": [
+        {
+          "avg_us": 528.7848,
+          "total_us": 2115139.0,
+          "checksum": 139903857411,
+          "run_index": 1
+        },
+        {
+          "avg_us": 563.3428,
+          "total_us": 2253371.0,
+          "checksum": 139903857411,
+          "run_index": 2
+        },
+        {
+          "avg_us": 475.9497,
+          "total_us": 1903799.0,
+          "checksum": 139903857411,
+          "run_index": 3
+        },
+        {
+          "avg_us": 600.4132,
+          "total_us": 2401653.0,
+          "checksum": 139903857411,
+          "run_index": 4
+        },
+        {
+          "avg_us": 674.0665,
+          "total_us": 2696266.0,
+          "checksum": 139903857411,
+          "run_index": 5
+        },
+        {
+          "avg_us": 665.3735,
+          "total_us": 2661494.0,
+          "checksum": 139903857411,
+          "run_index": 6
+        },
+        {
+          "avg_us": 467.2822,
+          "total_us": 1869129.0,
+          "checksum": 139903857411,
+          "run_index": 7
+        },
+        {
+          "avg_us": 467.4195,
+          "total_us": 1869678.0,
+          "checksum": 139903857411,
+          "run_index": 8
+        },
+        {
+          "avg_us": 522.4345,
+          "total_us": 2089738.0,
+          "checksum": 139903857411,
+          "run_index": 9
+        }
+      ],
+      "checksum": 139903857411,
+      "median_avg_us": 528.7848,
+      "mean_avg_us": 551.6740777777778,
+      "min_avg_us": 467.2822,
+      "max_avg_us": 674.0665,
+      "p10_avg_us": 467.39204,
+      "p90_avg_us": 667.1121,
+      "stdev_avg_us": 80.43087170934085,
+      "scatter_gather_warnings": 1,
+      "compile_command": [
+        "parsimony",
+        "-O3",
+        "-march=native",
+        "-mprefer-vector-width=512",
+        "-I/home/ubuntu/583/Parsimony-583/apps/synet-simd/src",
+        "array_packing_perf.cpp",
+        "-o",
+        "/home/ubuntu/583/Parsimony-583/compiler/tests/comparison_results/bin/array_packing_perf_packing_on",
+        "--Xpsv=",
+        "--Xtmp=/home/ubuntu/583/Parsimony-583/compiler/tests/comparison_results/tmp/packing_on"
+      ]
+    },
+    "median_speedup": 11.284512149365865,
+    "median_improvement_pct": 91.13829657176456
+  }
+}

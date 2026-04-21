@@ -28,7 +28,7 @@ mkdir -p bin
 for i in $FILES; do
   echo $i
   BIN=$(echo $i | sed "s/.cpp$//")
-  cmd="parsimony -O3 -march=native -mprefer-vector-width=512 -I../../apps/synet-simd/src $i -o bin/$BIN --Xpsv=\"$PSV_EXTRA\" --Xtmp tmp"
+  cmd="parsimony -O3 -march=native  -I../../apps/synet-simd/src $i -o bin/$BIN --Xpsv=\"$PSV_EXTRA\" --Xtmp tmp"
   echo $cmd
   eval $cmd
   ./bin/$BIN

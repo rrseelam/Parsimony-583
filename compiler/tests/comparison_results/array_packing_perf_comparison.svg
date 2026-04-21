@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="620" viewBox="0 0 1100 620">
+<rect width="100%" height="100%" fill="white"/>
+<text x="550.0" y="34.0" font-size="24" font-family="Arial, sans-serif" text-anchor="middle">Array Packing Performance Comparison</text>
+<text x="550.0" y="58.0" font-size="14" font-family="Arial, sans-serif" text-anchor="middle">Lower avg_us is better. Bars show repeated runs of the same benchmark.</text>
+<line x1="90" y1="520.0" x2="1060" y2="520.0" stroke="#dddddd" stroke-width="1"/>
+<text x="78.0" y="525.0" font-size="12" font-family="Arial, sans-serif" text-anchor="end">0</text>
+<line x1="90" y1="432.0" x2="1060" y2="432.0" stroke="#dddddd" stroke-width="1"/>
+<text x="78.0" y="437.0" font-size="12" font-family="Arial, sans-serif" text-anchor="end">1567</text>
+<line x1="90" y1="344.0" x2="1060" y2="344.0" stroke="#dddddd" stroke-width="1"/>
+<text x="78.0" y="349.0" font-size="12" font-family="Arial, sans-serif" text-anchor="end">3133</text>
+<line x1="90" y1="256.0" x2="1060" y2="256.0" stroke="#dddddd" stroke-width="1"/>
+<text x="78.0" y="261.0" font-size="12" font-family="Arial, sans-serif" text-anchor="end">4700</text>
+<line x1="90" y1="168.0" x2="1060" y2="168.0" stroke="#dddddd" stroke-width="1"/>
+<text x="78.0" y="173.0" font-size="12" font-family="Arial, sans-serif" text-anchor="end">6267</text>
+<line x1="90" y1="80.0" x2="1060" y2="80.0" stroke="#dddddd" stroke-width="1"/>
+<text x="78.0" y="85.0" font-size="12" font-family="Arial, sans-serif" text-anchor="end">7833</text>
+<line x1="90" y1="80" x2="90" y2="520" stroke="#333333" stroke-width="2"/>
+<line x1="90" y1="520" x2="1060" y2="520" stroke="#333333" stroke-width="2"/>
+<rect x="108.7" y="142.2" width="30.2" height="377.8" fill="#9aa0a6"/>
+<rect x="148.9" y="490.3" width="30.2" height="29.7" fill="#4285f4"/>
+<text x="143.9" y="544.0" font-size="12" font-family="Arial, sans-serif" text-anchor="middle">Run 1</text>
+<rect x="216.5" y="188.6" width="30.2" height="331.4" fill="#9aa0a6"/>
+<rect x="256.7" y="488.4" width="30.2" height="31.6" fill="#4285f4"/>
+<text x="251.7" y="544.0" font-size="12" font-family="Arial, sans-serif" text-anchor="middle">Run 2</text>
+<rect x="324.3" y="202.7" width="30.2" height="317.3" fill="#9aa0a6"/>
+<rect x="364.4" y="493.3" width="30.2" height="26.7" fill="#4285f4"/>
+<text x="359.4" y="544.0" font-size="12" font-family="Arial, sans-serif" text-anchor="middle">Run 3</text>
+<rect x="432.0" y="137.4" width="30.2" height="382.6" fill="#9aa0a6"/>
+<rect x="472.2" y="486.3" width="30.2" height="33.7" fill="#4285f4"/>
+<text x="467.2" y="544.0" font-size="12" font-family="Arial, sans-serif" text-anchor="middle">Run 4</text>
+<rect x="539.8" y="181.4" width="30.2" height="338.6" fill="#9aa0a6"/>
+<rect x="580.0" y="482.1" width="30.2" height="37.9" fill="#4285f4"/>
+<text x="575.0" y="544.0" font-size="12" font-family="Arial, sans-serif" text-anchor="middle">Run 5</text>
+<rect x="647.6" y="236.4" width="30.2" height="283.6" fill="#9aa0a6"/>
+<rect x="687.8" y="482.6" width="30.2" height="37.4" fill="#4285f4"/>
+<text x="682.8" y="544.0" font-size="12" font-family="Arial, sans-serif" text-anchor="middle">Run 6</text>
+<rect x="755.4" y="187.6" width="30.2" height="332.4" fill="#9aa0a6"/>
+<rect x="795.6" y="493.8" width="30.2" height="26.2" fill="#4285f4"/>
+<text x="790.6" y="544.0" font-size="12" font-family="Arial, sans-serif" text-anchor="middle">Run 7</text>
+<rect x="863.2" y="148.3" width="30.2" height="371.7" fill="#9aa0a6"/>
+<rect x="903.3" y="493.7" width="30.2" height="26.3" fill="#4285f4"/>
+<text x="898.3" y="544.0" font-size="12" font-family="Arial, sans-serif" text-anchor="middle">Run 8</text>
+<rect x="970.9" y="184.8" width="30.2" height="335.2" fill="#9aa0a6"/>
+<rect x="1011.1" y="490.7" width="30.2" height="29.3" fill="#4285f4"/>
+<text x="1006.1" y="544.0" font-size="12" font-family="Arial, sans-serif" text-anchor="middle">Run 9</text>
+<rect x="850" y="66" width="14" height="14" fill="#9aa0a6"/>
+<text x="915.0" y="78.0" font-size="13" font-family="Arial, sans-serif" text-anchor="middle">Packing disabled</text>
+<rect x="995" y="66" width="14" height="14" fill="#4285f4"/>
+<text x="1045.0" y="78.0" font-size="13" font-family="Arial, sans-serif" text-anchor="middle">Packing enabled</text>
+<rect x="755" y="98" width="285" height="120" fill="#f7f7f7" stroke="#cccccc"/>
+<text x="897.5" y="122.0" font-size="16" font-family="Arial, sans-serif" text-anchor="middle">Median Summary</text>
+<text x="771.0" y="148.0" font-size="13" font-family="Arial, sans-serif" text-anchor="start">Disabled: 5967.0785 us</text>
+<text x="771.0" y="170.0" font-size="13" font-family="Arial, sans-serif" text-anchor="start">Enabled:  528.7848 us</text>
+<text x="771.0" y="192.0" font-size="13" font-family="Arial, sans-serif" text-anchor="start">Speedup:  11.285x</text>
+<text x="771.0" y="214.0" font-size="13" font-family="Arial, sans-serif" text-anchor="start">Improvement: 91.14%</text>
+<text x="28.0" y="300.0" font-size="14" font-family="Arial, sans-serif" text-anchor="middle">avg_us</text>
+<text x="550.0" y="598.0" font-size="14" font-family="Arial, sans-serif" text-anchor="middle">Measured runs</text>
+</svg>
